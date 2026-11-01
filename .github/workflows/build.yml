@@ -1,0 +1,84 @@
+name: Build APK
+
+# Runs every time you upload files, or when you press "Run workflow" on the Actions tab.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # lets the last step publish the APK on the Releases page
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Get the files
+        uses: actions/checkout@v4
+
+      # Works with WifiAutopilot.zip (uploaded as it is) or with the unzipped project files.
+      - name: Find the project (unpacks WifiAutopilot.zip if needed)
+        shell: bash
+        run: |
+          if [ ! -f settings.gradle.kts ]; then
+            FOUND="$(find . -mindepth 2 -maxdepth 3 -name settings.gradle.kts -not -path './.git/*' 2>/dev/null | head -n 1 || true)"
+            if [ -n "$FOUND" ]; then
+              DIR="$(dirname "$FOUND")"
+            else
+              BEST=""; BESTV=-1
+              for Z in *.zip; do
+                [ -f "$Z" ] || continue
+                V="$(unzip -p "$Z" '*app/build.gradle.kts' 2>/dev/null | grep -oE 'versionCode *= *[0-9]+' | grep -oE '[0-9]+' | head -n 1 || true)"
+                V="${V:-0}"
+                if [ "$V" -gt "$BESTV" ]; then BEST="$Z"; BESTV="$V"; fi
+              done
+              if [ -z "$BEST" ]; then
+                echo "::error::No project found. Upload WifiAutopilot.zip to this repository."
+                exit 1
+              fi
+              echo "Unpacking $BEST"
+              unzip -q -o "$BEST" -d "$RUNNER_TEMP/project"
+              FOUND="$(find "$RUNNER_TEMP/project" -name settings.gradle.kts 2>/dev/null | head -n 1 || true)"
+              if [ -z "$FOUND" ]; then
+                echo "::error::$BEST doesn't contain the project (settings.gradle.kts not found)."
+                exit 1
+              fi
+              DIR="$(dirname "$FOUND")"
+            fi
+            echo "Using the project in $DIR"
+            cp -a "$DIR"/. .
+          fi
+          chmod +x gradlew
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle (cache + wrapper check)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Save the APK (Actions → this run → Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WifiAutopilot-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish the APK on the Releases page (direct download)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk WifiAutopilot.apk
+          gh release create "build-${{ github.run_number }}" WifiAutopilot.apk app/build/outputs/apk/debug/app-debug.apk \
+            --target "${{ github.sha }}" \
+            --title "Wi-Fi Autopilot – build ${{ github.run_number }}" \
+            --notes "Built automatically. Download WifiAutopilot.apk below and open it on your phone to install or update."
